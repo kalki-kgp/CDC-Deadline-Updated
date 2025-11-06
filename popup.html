@@ -1,0 +1,58 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Applied Companies</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="title">
+        <span class="dot"></span>
+        <h1>Applied Companies</h1>
+      </div>
+      <div class="actions">
+        <button id="refreshBtn" class="btn" title="Refresh from ERP page">↻</button>
+        <button id="openERPBtn" class="btn" title="Open ERP">↗</button>
+      </div>
+    </header>
+
+    <section class="toolbar">
+      <div class="search">
+        <span class="icon">🔎</span>
+        <input id="searchInput" type="text" placeholder="Search company name" />
+      </div>
+      <div class="meta">
+        <span id="count">0</span>
+        <span class="sep">•</span>
+        <span id="updated">—</span>
+      </div>
+    </section>
+
+    <main id="list" class="list" aria-live="polite"></main>
+
+    <template id="itemTemplate">
+      <article class="card">
+        <div class="card-title">
+          <h2 class="company"></h2>
+          <span class="chip chip-green">Applied</span>
+        </div>
+        <div class="details">
+          <div><span class="label">Role:</span> <span class="role">—</span></div>
+          <div><span class="label">CTC:</span> <span class="ctc">—</span></div>
+          <div><span class="label">Deadline:</span> <span class="deadline">—</span></div>
+        </div>
+      </article>
+    </template>
+
+    <section id="empty" class="empty hidden">
+      <div class="empty-emoji">🗂️</div>
+      <div class="empty-title">No applied companies yet</div>
+      <div class="empty-sub">Open the ERP placement page; it auto-syncs here.</div>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+  </html>
+
