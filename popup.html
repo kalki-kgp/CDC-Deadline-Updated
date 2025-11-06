@@ -31,10 +31,20 @@
       </div>
     </section>
 
-    <section class="filters">
-      <button class="chip chip-toggle chip-green active" data-bucket="APPLIED">Applied <span class="num" id="cnt-applied">0</span></button>
-      <button class="chip chip-toggle chip-yellow active" data-bucket="OPEN">Can Apply <span class="num" id="cnt-open">0</span></button>
-      <button class="chip chip-toggle chip-red active" data-bucket="MISSED">Missed <span class="num" id="cnt-missed">0</span></button>
+    <section class="tabs">
+      <button class="chip tab chip-green active" data-bucket="APPLIED">Applied <span class="num" id="cnt-applied">0</span></button>
+      <button class="chip tab chip-yellow" data-bucket="OPEN">Can Apply <span class="num" id="cnt-open">0</span></button>
+      <button class="chip tab chip-red" data-bucket="MISSED">Missed <span class="num" id="cnt-missed">0</span></button>
+      <div class="spacer"></div>
+      <label class="sort">
+        <span>Sort</span>
+        <select id="sortSelect">
+          <option value="deadline_asc">Deadline ↑</option>
+          <option value="deadline_desc">Deadline ↓</option>
+          <option value="name_asc">Company A–Z</option>
+          <option value="name_desc">Company Z–A</option>
+        </select>
+      </label>
     </section>
 
     <section id="progress" class="progress hidden" aria-live="polite">

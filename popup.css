@@ -58,10 +58,13 @@ html, body{
 .chip-yellow{ background: rgba(255,234,0,.1); color: var(--yellow); border-color: rgba(255,234,0,.35); }
 .chip-red{ background: rgba(252,36,3,.12); color: var(--red); border-color: rgba(252,36,3,.35); }
 
-.filters{ display:flex; gap:8px; padding: 0 12px 8px; flex-wrap: wrap; }
-.chip-toggle{ cursor: pointer; opacity:.9; }
-.chip-toggle.active{ box-shadow: 0 0 0 2px rgba(255,255,255,.06) inset; opacity:1; }
-.chip-toggle .num{ margin-left: 6px; opacity:.9; }
+.tabs{ display:flex; align-items:center; gap:8px; padding: 0 12px 8px; flex-wrap: nowrap; }
+.tab{ cursor: pointer; opacity:.9; }
+.tab.active{ box-shadow: 0 0 0 2px rgba(255,255,255,.06) inset; opacity:1; }
+.tab .num{ margin-left: 6px; opacity:.9; }
+.tabs .spacer{ flex: 1; }
+.tabs .sort{ display:flex; align-items:center; gap:6px; color: var(--muted); font-size: 12px; }
+.tabs .sort select{ background: var(--panel); color: var(--text); border:1px solid var(--card-border); border-radius: 8px; padding: 6px 8px; }
 
 .details{ display:grid; gap:6px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .details .label{ color: #b7bdd6; }

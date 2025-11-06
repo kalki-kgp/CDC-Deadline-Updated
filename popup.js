@@ -3,8 +3,9 @@ const $ = (sel, ctx=document) => ctx.querySelector(sel);
 
 const defaultColors = { applied: '#a5fc03', open: '#ffea00', missed: '#fc2403' };
 let colorPrefs = { ...defaultColors };
-let selectedBuckets = new Set(['APPLIED','OPEN','MISSED']);
+let activeBucket = 'APPLIED';
 let allItems = [];
+let currentSort = 'deadline_asc';
 
 function formatTime(ts){
   if (!ts) return '—';
@@ -95,8 +96,37 @@ function updateCounts(counts){
 
 function filteredItems(base){
   const q = $('#searchInput').value;
-  const byBucket = base.filter(it => selectedBuckets.has((it.statusBucket || 'APPLIED').toUpperCase()));
-  return applySearch(byBucket, q);
+  const byBucket = base.filter(it => (it.statusBucket || 'APPLIED').toUpperCase() === activeBucket);
+  const searched = applySearch(byBucket, q);
+  return sortItems(searched, currentSort);
+}
+
+function parseDeadline(s){
+  if (!s) return NaN;
+  // Expect dd-mm-yyyy hh:mm
+  const m = String(s).trim().match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})/);
+  if (!m) return NaN;
+  const [_, d, mo, y, h, mi] = m;
+  const dt = new Date(Number(y), Number(mo)-1, Number(d), Number(h), Number(mi));
+  return dt.getTime();
+}
+
+function sortItems(items, key){
+  const arr = items.slice();
+  if (key === 'name_asc' || key === 'name_desc'){
+    arr.sort((a,b) => (a.company||'').localeCompare(b.company||'', undefined, {sensitivity:'base'}));
+    if (key === 'name_desc') arr.reverse();
+  } else if (key === 'deadline_asc' || key === 'deadline_desc'){
+    arr.sort((a,b) => {
+      const ta = parseDeadline(a.deadlineEnd || a.deadline);
+      const tb = parseDeadline(b.deadlineEnd || b.deadline);
+      const aa = isNaN(ta) ? Number.POSITIVE_INFINITY : ta;
+      const bb = isNaN(tb) ? Number.POSITIVE_INFINITY : tb;
+      return aa - bb;
+    });
+    if (key === 'deadline_desc') arr.reverse();
+  }
+  return arr;
 }
 
 function setProgress(pct){
@@ -147,20 +177,22 @@ async function bootstrap(){
   $('#openERPBtn').addEventListener('click', openERP);
 
   // Filters
-  $$('.chip-toggle').forEach(ch => {
-    ch.addEventListener('click', () => {
-      const b = ch.getAttribute('data-bucket');
-      if (ch.classList.contains('active')) {
-        ch.classList.remove('active');
-        selectedBuckets.delete(b);
-      } else {
-        ch.classList.add('active');
-        selectedBuckets.add(b);
-      }
+  $$('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      $$('.tab').forEach(t => t.classList.remove('active'));
+      tab.classList.add('active');
+      activeBucket = (tab.getAttribute('data-bucket') || 'APPLIED').toUpperCase();
       const filtered = filteredItems(allItems);
       setMeta(filtered.length, state.updatedAt);
       renderList(filtered);
     });
+  });
+
+  $('#sortSelect').addEventListener('change', (e) => {
+    currentSort = e.target.value;
+    const filtered = filteredItems(allItems);
+    setMeta(filtered.length, state.updatedAt);
+    renderList(filtered);
   });
 
   // Settings
