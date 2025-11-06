@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Applied Companies</title>
+    <title>CDC Dashboard</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -13,8 +13,9 @@
         <h1>Applied Companies</h1>
       </div>
       <div class="actions">
-        <button id="refreshBtn" class="btn" title="Refresh from ERP page">↻</button>
+        <button id="refreshBtn" class="btn" title="Deep refresh from ERP">↻</button>
         <button id="openERPBtn" class="btn" title="Open ERP">↗</button>
+        <button id="settingsBtn" class="btn" title="Settings">⚙</button>
       </div>
     </header>
 
@@ -30,13 +31,24 @@
       </div>
     </section>
 
+    <section class="filters">
+      <button class="chip chip-toggle chip-green active" data-bucket="APPLIED">Applied <span class="num" id="cnt-applied">0</span></button>
+      <button class="chip chip-toggle chip-yellow active" data-bucket="OPEN">Can Apply <span class="num" id="cnt-open">0</span></button>
+      <button class="chip chip-toggle chip-red active" data-bucket="MISSED">Missed <span class="num" id="cnt-missed">0</span></button>
+    </section>
+
+    <section id="progress" class="progress hidden" aria-live="polite">
+      <div id="progressBar" class="progress-bar"></div>
+      <div id="progressText" class="progress-text">Scanning…</div>
+    </section>
+
     <main id="list" class="list" aria-live="polite"></main>
 
     <template id="itemTemplate">
-      <article class="card">
+      <article class="card" data-bucket="">
         <div class="card-title">
           <h2 class="company"></h2>
-          <span class="chip chip-green">Applied</span>
+          <span class="chip chip-status">—</span>
         </div>
         <div class="details">
           <div><span class="label">Role:</span> <span class="role">—</span></div>
@@ -48,11 +60,30 @@
 
     <section id="empty" class="empty hidden">
       <div class="empty-emoji">🗂️</div>
-      <div class="empty-title">No applied companies yet</div>
-      <div class="empty-sub">Open the ERP placement page; it auto-syncs here.</div>
+      <div class="empty-title">Nothing to show</div>
+      <div class="empty-sub">Adjust filters or open the ERP placement page; it auto-syncs here.</div>
+    </section>
+
+    <section id="settings" class="settings hidden">
+      <h3>Colors</h3>
+      <div class="row">
+        <label>Applied (Y)</label>
+        <input type="color" id="colorApplied" value="#a5fc03" />
+      </div>
+      <div class="row">
+        <label>Can Apply</label>
+        <input type="color" id="colorOpen" value="#ffea00" />
+      </div>
+      <div class="row">
+        <label>Missed</label>
+        <input type="color" id="colorMissed" value="#fc2403" />
+      </div>
+      <div class="row buttons">
+        <button id="saveColorsBtn" class="btn">Save</button>
+        <button id="resetColorsBtn" class="btn">Reset</button>
+      </div>
     </section>
 
     <script src="popup.js"></script>
   </body>
   </html>
-

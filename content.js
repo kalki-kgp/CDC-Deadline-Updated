@@ -3,13 +3,27 @@ const targetFrame = window.frames[frameName]; //Access the frame by its name
 var templateXPath = "/html/body/table/tbody/tr[3]/td/table/tbody/tr/td/table/tbody/tr/td/div[2]/div[3]/div[3]/div/table/tbody/tr[{number}]/td[12]";
 const startNumber = 2;
 const endNumber = 600;
-const greenColor = '#a5fc03'; // applied (Y)
-const yellowColor = '#ffea00'; // can still apply (open, not Y)
-const redColor = '#fc2403'; // deadline over
+
+// Colors are customizable via chrome.storage.local 'colors' key
+var defaultColors = {
+  applied: '#a5fc03', // green
+  open: '#ffea00',    // yellow
+  missed: '#fc2403',  // red
+  box: '#cccccc'
+};
+var userColors = Object.assign({}, defaultColors);
+function getColorForBucket(bucket) {
+  if (bucket === 'APPLIED') return userColors.applied;
+  if (bucket === 'OPEN') return userColors.open;
+  if (bucket === 'MISSED') return userColors.missed;
+  return userColors.box;
+}
 const boxColor = '#cccccc';
 var intervalID = setInterval(myFunction, 100);
 var lastSaved = 0; // throttle storage saves
 var isCrawling = false; // prevent concurrent deep scans
+var autoDeepScanScheduled = false;
+var autoDeepScanAttempts = 0;
 
 // Function to generate Xpath Expressions from template
 function generateXPathExpressions(templateXPath, startNumber, endNumber) {
@@ -70,6 +84,26 @@ function selectedElements(element) {
   return array;
 }
 
+// Load saved colors and update runtime
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+  try {
+    chrome.storage.local.get(['colors'], function (data) {
+      if (data && data.colors) {
+        try { userColors = Object.assign({}, defaultColors, data.colors || {}); } catch (e) {}
+      }
+    });
+  } catch (e) {}
+  if (chrome.storage.onChanged) {
+    chrome.storage.onChanged.addListener(function (changes, area) {
+      if (area === 'local' && changes.colors) {
+        try { userColors = Object.assign({}, defaultColors, changes.colors.newValue || {}); } catch (e) {}
+        // Recolor visible rows with new colors
+        try { myFunction(); } catch (e) {}
+      }
+    });
+  }
+}
+
 // Helpers to extract row details safely using aria-describedby suffixes found in ERP grid
 function getRowCellBySuffix(row, suffix) {
   if (!row) return null;
@@ -109,20 +143,31 @@ function uniqueKeyForRowInfo(info) {
   return [info.company, info.role, info.deadlineEnd].join('|');
 }
 
-function collectAppliedFromDOM(intoMap) {
+function computeBucket(isApplied, deadlineTime, nowTs) {
+  if (isApplied) return 'APPLIED';
+  if (isNaN(deadlineTime)) return 'UNKNOWN';
+  return (deadlineTime <= nowTs) ? 'MISSED' : 'OPEN';
+}
+
+function collectAllFromDOM(intoMap) {
   var cells = targetFrame && targetFrame.document
     ? targetFrame.document.querySelectorAll('td[aria-describedby$="_resumedeadline"]')
     : [];
   for (var i = 0; i < cells.length; i++) {
     var info = extractRowInfoFromDeadlineCell(cells[i]);
-    if (info && info.status.indexOf('Y') !== -1) {
-      intoMap[uniqueKeyForRowInfo(info)] = info;
-    }
+    if (!info) continue;
+    var nowTs = Date.now();
+    var dt = getElementDateTimeFromText(info.deadlineEnd || '');
+    var deadlineTime = (dt instanceof Date && !isNaN(dt.getTime())) ? dt.getTime() : NaN;
+    var isApplied = (info.status || '').toUpperCase().indexOf('Y') !== -1;
+    var bucket = computeBucket(isApplied, deadlineTime, nowTs);
+    info.statusBucket = bucket;
+    intoMap[uniqueKeyForRowInfo(info)] = info;
   }
 }
 
-// Deep crawl: scroll the grid body to load all virtualized rows and collect applied companies
-function deepCollectAppliedCompanies(done) {
+// Deep crawl: scroll the grid body to load all virtualized rows and collect companies with buckets
+function deepCollectAllCompanies(done, reportProgress) {
   try {
     if (!targetFrame || !targetFrame.document) {
       done([]);
@@ -131,7 +176,7 @@ function deepCollectAppliedCompanies(done) {
     var bdiv = targetFrame.document.querySelector('.ui-jqgrid-bdiv');
     if (!bdiv) {
       var map = {};
-      collectAppliedFromDOM(map);
+      collectAllFromDOM(map);
       done(Object.keys(map).map(function (k) { return map[k]; }));
       return;
     }
@@ -139,7 +184,7 @@ function deepCollectAppliedCompanies(done) {
     if (isCrawling) {
       // If already crawling, do a quick snapshot to avoid blocking
       var mapQuick = {};
-      collectAppliedFromDOM(mapQuick);
+      collectAllFromDOM(mapQuick);
       done(Object.keys(mapQuick).map(function (k) { return mapQuick[k]; }));
       return;
     }
@@ -156,11 +201,17 @@ function deepCollectAppliedCompanies(done) {
 
     function stepFn() {
       try {
-        collectAppliedFromDOM(map);
+        collectAllFromDOM(map);
+        if (typeof reportProgress === 'function') {
+          try {
+            var pct = max > 0 ? Math.min(100, Math.round((pos / max) * 100)) : 100;
+            reportProgress(pct);
+          } catch (e) {}
+        }
         // If reached or very near bottom, finalize after one extra pass
         if (pos >= max - 5) {
           setTimeout(function () {
-            try { collectAppliedFromDOM(map); } catch (e) {}
+            try { collectAllFromDOM(map); } catch (e) {}
             // restore original scroll position
             bdiv.scrollTop = prevTop;
             isCrawling = false;
@@ -206,14 +257,8 @@ function changeColor(element, elementDateTime, currentDateTime) {
   // - Green if applied (Y), regardless of deadline.
   // - Red if deadline is over and not applied.
   // - Yellow if deadline not over and not applied.
-  var color;
-  if (isApplied) {
-    color = greenColor;
-  } else if (isDeadlinePassed) {
-    color = redColor;
-  } else {
-    color = yellowColor;
-  }
+  var bucket = isApplied ? 'APPLIED' : (isDeadlinePassed ? 'MISSED' : 'OPEN');
+  var color = getColorForBucket(bucket);
 
   for (var i = 0; i < changeColorElement.length; i++) {
     if (!changeColorElement[i]) continue;
@@ -236,7 +281,7 @@ function myFunction() {
   var deadlineCells = targetFrame.document.querySelectorAll('td[aria-describedby$="_resumedeadline"]');
 
   if (deadlineCells && deadlineCells.length > 0) {
-    var appliedMap = {};
+    var rowMap = {};
     for (var j = 0; j < deadlineCells.length; j++) {
       var cell = deadlineCells[j];
       var txt = cell && cell.textContent ? cell.textContent.trim() : '';
@@ -248,18 +293,34 @@ function myFunction() {
       var now = Date.now();
       changeColor(cell, dt, now);
 
-      // Build applied companies list (Application Status = 'Y')
+      // Build companies snapshot with status bucket
       var rowInfo = extractRowInfoFromDeadlineCell(cell);
-      if (rowInfo && rowInfo.status.indexOf('Y') !== -1) {
-        appliedMap[uniqueKeyForRowInfo(rowInfo)] = rowInfo;
+      if (rowInfo) {
+        var isApplied = (rowInfo.status || '').toUpperCase().indexOf('Y') !== -1;
+        var bucket = computeBucket(isApplied, dt.getTime(), now);
+        rowInfo.statusBucket = bucket;
+        rowMap[uniqueKeyForRowInfo(rowInfo)] = rowInfo;
       }
     }
 
     // Throttled persist to storage for popup consumption
     var nowTs = Date.now();
     if (nowTs - lastSaved > 1500 && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      var appliedList = Object.keys(appliedMap).map(function (k) { return appliedMap[k]; });
-      chrome.storage.local.set({ appliedCompanies: appliedList, appliedCompaniesUpdatedAt: nowTs });
+      var allList = Object.keys(rowMap).map(function (k) { return rowMap[k]; });
+      var counts = { applied: 0, open: 0, missed: 0 };
+      for (var c = 0; c < allList.length; c++) {
+        if (allList[c].statusBucket === 'APPLIED') counts.applied++;
+        else if (allList[c].statusBucket === 'OPEN') counts.open++;
+        else if (allList[c].statusBucket === 'MISSED') counts.missed++;
+      }
+      var appliedList = allList.filter(function (it) { return it.statusBucket === 'APPLIED'; });
+      chrome.storage.local.set({
+        appliedCompanies: appliedList,
+        appliedCompaniesUpdatedAt: nowTs,
+        allCompanies: allList,
+        allCompaniesUpdatedAt: nowTs,
+        statusCounts: counts
+      });
       lastSaved = nowTs;
     }
   } else {
@@ -282,39 +343,104 @@ function myFunction() {
 
 } // Delay of 0.1 seconds (100 milliseconds)
 
+// Auto-run a deep scan shortly after grid load, with a few retries
+function scheduleAutoDeepScan() {
+  if (autoDeepScanScheduled) return;
+  autoDeepScanScheduled = true;
+  function tryScan() {
+    try {
+      if (!targetFrame || !targetFrame.document || !targetFrame.document.querySelector('.ui-jqgrid-bdiv')) {
+        autoDeepScanAttempts++;
+        if (autoDeepScanAttempts < 10) {
+          setTimeout(tryScan, 1500);
+        }
+        return;
+      }
+      deepCollectAllCompanies(function(list){
+        var ts = Date.now();
+        var counts = { applied: 0, open: 0, missed: 0 };
+        for (var i=0;i<list.length;i++){
+          var b = list[i].statusBucket;
+          if (b === 'APPLIED') counts.applied++;
+          else if (b === 'OPEN') counts.open++;
+          else if (b === 'MISSED') counts.missed++;
+        }
+        try {
+          if (chrome.storage && chrome.storage.local) {
+            chrome.storage.local.set({
+              allCompanies: list,
+              allCompaniesUpdatedAt: ts,
+              statusCounts: counts,
+              appliedCompanies: list.filter(function (it) { return it.statusBucket === 'APPLIED'; }),
+              appliedCompaniesUpdatedAt: ts
+            });
+          }
+        } catch (e) {}
+      }, function (pct) {
+        try { chrome.runtime.sendMessage({ type: 'DEEP_SCAN_PROGRESS', progress: pct }); } catch (e) {}
+      });
+    } catch (e) {}
+  }
+  setTimeout(tryScan, 2000);
+}
+scheduleAutoDeepScan();
+
 // Respond to popup requests to get applied companies on demand
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
-    if (!msg || msg.type !== 'GET_APPLIED_COMPANIES') return; 
-    var deep = !!msg.deep;
-    try {
-      if (!targetFrame || !targetFrame.document) {
-        sendResponse({ appliedCompanies: [], appliedCompaniesUpdatedAt: Date.now() });
-        return true;
-      }
+    if (!msg) return;
+    if (msg.type === 'GET_APPLIED_COMPANIES' || msg.type === 'GET_COMPANIES') {
+      var deep = !!msg.deep;
+      try {
+        if (!targetFrame || !targetFrame.document) {
+          sendResponse({ appliedCompanies: [], allCompanies: [], counts: { applied:0, open:0, missed:0 }, updatedAt: Date.now() });
+          return true;
+        }
 
-      var finalize = function(list) {
-        var ts = Date.now();
-        try {
-          if (chrome.storage && chrome.storage.local) {
-            chrome.storage.local.set({ appliedCompanies: list, appliedCompaniesUpdatedAt: ts });
+        var finalize = function(list) {
+          var ts = Date.now();
+          var counts = { applied: 0, open: 0, missed: 0 };
+          for (var i=0;i<list.length;i++){
+            var b = list[i].statusBucket;
+            if (b === 'APPLIED') counts.applied++;
+            else if (b === 'OPEN') counts.open++;
+            else if (b === 'MISSED') counts.missed++;
           }
-        } catch (e) {}
-        try { sendResponse({ appliedCompanies: list, appliedCompaniesUpdatedAt: ts }); } catch (e) {}
-      };
+          var appliedOnly = list.filter(function (it) { return it.statusBucket === 'APPLIED'; });
+          try {
+            if (chrome.storage && chrome.storage.local) {
+              chrome.storage.local.set({ 
+                allCompanies: list,
+                allCompaniesUpdatedAt: ts,
+                statusCounts: counts,
+                appliedCompanies: appliedOnly,
+                appliedCompaniesUpdatedAt: ts
+              });
+            }
+          } catch (e) {}
+          try { sendResponse({ appliedCompanies: appliedOnly, allCompanies: list, counts: counts, updatedAt: ts }); } catch (e) {}
+        };
 
-      if (deep) {
-        deepCollectAppliedCompanies(function(list){ finalize(list); });
-      } else {
-        var map = {};
-        collectAppliedFromDOM(map);
-        var list = Object.keys(map).map(function (k) { return map[k]; });
-        finalize(list);
+        if (deep) {
+          deepCollectAllCompanies(function(list){ finalize(list); }, function (pct) {
+            try { chrome.runtime.sendMessage({ type: 'DEEP_SCAN_PROGRESS', progress: pct }); } catch (e) {}
+          });
+        } else {
+          var map = {};
+          collectAllFromDOM(map);
+          var list = Object.keys(map).map(function (k) { return map[k]; });
+          finalize(list);
+        }
+      } catch (e) {
+        try { sendResponse({ appliedCompanies: [], allCompanies: [], counts: { applied:0, open:0, missed:0 }, updatedAt: Date.now(), error: String(e) }); } catch (ee) {}
       }
-    } catch (e) {
-      try { sendResponse({ appliedCompanies: [], appliedCompaniesUpdatedAt: Date.now(), error: String(e) }); } catch (ee) {}
+      return true; // keep message channel open for async sendResponse
     }
-    return true; // keep message channel open for async sendResponse
+    if (msg.type === 'RECOLOR') {
+      try { myFunction(); } catch (e) {}
+      try { sendResponse({ ok: true }); } catch (e) {}
+      return true;
+    }
   });
 }
 

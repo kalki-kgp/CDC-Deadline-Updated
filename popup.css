@@ -58,6 +58,11 @@ html, body{
 .chip-yellow{ background: rgba(255,234,0,.1); color: var(--yellow); border-color: rgba(255,234,0,.35); }
 .chip-red{ background: rgba(252,36,3,.12); color: var(--red); border-color: rgba(252,36,3,.35); }
 
+.filters{ display:flex; gap:8px; padding: 0 12px 8px; flex-wrap: wrap; }
+.chip-toggle{ cursor: pointer; opacity:.9; }
+.chip-toggle.active{ box-shadow: 0 0 0 2px rgba(255,255,255,.06) inset; opacity:1; }
+.chip-toggle .num{ margin-left: 6px; opacity:.9; }
+
 .details{ display:grid; gap:6px; margin-top: 6px; color: var(--muted); font-size: 12px; }
 .details .label{ color: #b7bdd6; }
 
@@ -67,3 +72,15 @@ html, body{
 .empty-title{ color: var(--text); font-weight: 600; margin-bottom: 6px; }
 .empty-sub{ font-size: 12px; }
 
+/* Progress */
+.progress{ position: relative; margin: 6px 12px; height: 10px; background: rgba(255,255,255,.08); border-radius: 999px; overflow: hidden; border:1px solid var(--card-border); }
+.progress-bar{ position:absolute; top:0; left:0; height:100%; width: 0%; background: linear-gradient(90deg, var(--accent), #9ea7ff); transition: width .15s ease; }
+.progress-text{ position:absolute; top: -22px; right: 0; font-size: 11px; color: var(--muted); }
+
+/* Settings */
+.settings{ padding: 12px; border-top: 1px solid var(--card-border); background: rgba(255,255,255,0.03); }
+.settings h3{ margin: 0 0 10px 0; font-size: 13px; font-weight: 600; color: #c7ccdf; }
+.settings .row{ display:flex; align-items:center; justify-content: space-between; margin: 8px 0; }
+.settings label{ color: var(--muted); font-size: 12px; }
+.settings input[type="color"]{ width: 40px; height: 24px; border: none; background: transparent; padding: 0; }
+.settings .buttons{ gap: 8px; }
