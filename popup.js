@@ -54,12 +54,13 @@ function setMeta(count, updatedAt){
 
 async function loadFromStorage(){
   return new Promise(resolve => {
-    chrome.storage.local.get(['allCompanies','allCompaniesUpdatedAt','statusCounts','colors'], data => {
+    chrome.storage.local.get(['allCompanies','allCompaniesUpdatedAt','statusCounts','colors','prefs'], data => {
       resolve({
         list: data.allCompanies || [],
         updatedAt: data.allCompaniesUpdatedAt || 0,
         counts: data.statusCounts || { applied: 0, open: 0, missed: 0 },
-        colors: data.colors || null
+        colors: data.colors || null,
+        prefs: data.prefs || null
       });
     });
   });
@@ -146,6 +147,22 @@ async function bootstrap(){
   const state = await loadFromStorage();
   if (state.colors) { colorPrefs = { ...defaultColors, ...state.colors }; }
   applyColorVars(colorPrefs);
+  // Load preferences (active tab + sort) if saved
+  if (state.prefs) {
+    const ab = String(state.prefs.activeBucket || '').toUpperCase();
+    if (ab === 'APPLIED' || ab === 'OPEN' || ab === 'MISSED') activeBucket = ab;
+    const sk = String(state.prefs.sortKey || '');
+    if (sk === 'deadline_asc' || sk === 'deadline_desc' || sk === 'name_asc' || sk === 'name_desc') currentSort = sk;
+  }
+
+  // Reflect prefs in UI
+  $$('.tab').forEach(t => {
+    if ((t.getAttribute('data-bucket') || '').toUpperCase() === activeBucket) t.classList.add('active');
+    else t.classList.remove('active');
+  });
+  const sortSel = $('#sortSelect');
+  if (sortSel) sortSel.value = currentSort;
+
   allItems = state.list;
   updateCounts(state.counts || {});
   setMeta(allItems.length, state.updatedAt);
@@ -185,6 +202,8 @@ async function bootstrap(){
       const filtered = filteredItems(allItems);
       setMeta(filtered.length, state.updatedAt);
       renderList(filtered);
+      // persist tab choice
+      chrome.storage.local.set({ prefs: { activeBucket, sortKey: currentSort } });
     });
   });
 
@@ -193,6 +212,8 @@ async function bootstrap(){
     const filtered = filteredItems(allItems);
     setMeta(filtered.length, state.updatedAt);
     renderList(filtered);
+    // persist sort choice
+    chrome.storage.local.set({ prefs: { activeBucket, sortKey: currentSort } });
   });
 
   // Settings
