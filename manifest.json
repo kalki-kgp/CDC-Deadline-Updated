@@ -2,8 +2,8 @@
   "update_url": "https://clients2.google.com/service/update2/crx",
   "manifest_version": 3,
   "name": "CDC (CV) Deadline Status - IIT KGP",
-  "version": "1.1.0",
-  "description": "Track CV submission deadlines with color indicators and view your applied companies.",
+  "version": "1.2.0",
+  "description": "Track CV submission deadlines with color indicators, view applied companies, and fetch CGPA requirements.",
   "icons": {
     "16": "icon-16.png",
     "48": "icon-48.png",

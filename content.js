@@ -25,6 +25,14 @@ var isCrawling = false; // prevent concurrent deep scans
 var autoDeepScanScheduled = false;
 var autoDeepScanAttempts = 0;
 
+// CGPA Fetching Configuration
+var CGPA_CONCURRENT_REQUESTS = 5; // Number of parallel requests
+var cgpaCache = {}; // In-memory cache: { "jnf_id|com_id": { cgpa: "8.0", fetchedAt: timestamp } }
+var isFetchingCGPA = false;
+var cgpaFetchQueue = [];
+var cgpaFetchProgress = { total: 0, completed: 0 };
+var userCGPA = null; // User's CGPA for eligibility check
+
 // Function to generate Xpath Expressions from template
 function generateXPathExpressions(templateXPath, startNumber, endNumber) {
   var xpaths = [];
@@ -142,6 +150,399 @@ function extractRowInfoFromDeadlineCell(deadlineCell) {
 
 function uniqueKeyForRowInfo(info) {
   return [info.company, info.role, info.deadlineEnd].join('|');
+}
+
+// CGPA key for caching
+function cgpaCacheKey(jnfId, comId) {
+  return jnfId + '|' + comId;
+}
+
+// Extract jnf_id and com_id from onclick handler string
+// e.g., TPJNFView("1","308","2025-2026") => { jnfId: "1", comId: "308", yop: "2025-2026" }
+function parseTPJNFViewCall(onclickStr) {
+  if (!onclickStr) return null;
+  var match = onclickStr.match(/TPJNFView\s*\(\s*["'](\d+)["']\s*,\s*["'](\d+)["']\s*,\s*["']([^"']+)["']\s*\)/);
+  if (!match) return null;
+  return { jnfId: match[1], comId: match[2], yop: match[3] };
+}
+
+// Extract CGPA cutoff from TPJNFView.jsp HTML response
+function parseCGPAFromHTML(html) {
+  // Look for the CGPA Cut-off cell in the table
+  // Structure: <td>CGPA Cut-off</td> in header, then value in data row
+  var result = { cgpa: null, eligible: null, departments: [] };
+  
+  try {
+    // Create a temporary DOM parser
+    var parser = new DOMParser();
+    var doc = parser.parseFromString(html, 'text/html');
+    
+    // Check eligibility message
+    var cells = doc.querySelectorAll('td');
+    for (var i = 0; i < cells.length; i++) {
+      var text = cells[i].textContent || '';
+      if (text.indexOf('CGPA cut off greater than yours') !== -1) {
+        result.eligible = false;
+      } else if (text.indexOf('eligible') !== -1 && text.indexOf('not') === -1) {
+        result.eligible = true;
+      }
+    }
+    
+    // Find CGPA Cut-off value - look for table with header "CGPA Cut-off"
+    var tables = doc.querySelectorAll('table');
+    for (var t = 0; t < tables.length; t++) {
+      var rows = tables[t].querySelectorAll('tr');
+      var cgpaColIndex = -1;
+      
+      for (var r = 0; r < rows.length; r++) {
+        var headerCells = rows[r].querySelectorAll('td, th');
+        
+        // Find which column has "CGPA Cut-off"
+        for (var c = 0; c < headerCells.length; c++) {
+          var cellText = (headerCells[c].textContent || '').trim();
+          if (cellText === 'CGPA Cut-off' || cellText === 'CGPA Cutoff') {
+            cgpaColIndex = c;
+          }
+        }
+        
+        // If we found the header, get the value from the next row
+        if (cgpaColIndex !== -1 && r + 1 < rows.length) {
+          var dataCells = rows[r + 1].querySelectorAll('td');
+          if (dataCells[cgpaColIndex]) {
+            var cgpaText = (dataCells[cgpaColIndex].textContent || '').trim();
+            if (cgpaText && !isNaN(parseFloat(cgpaText))) {
+              result.cgpa = cgpaText;
+              break;
+            }
+          }
+        }
+      }
+      if (result.cgpa) break;
+    }
+    
+    // Fallback: regex search for CGPA pattern
+    if (!result.cgpa) {
+      var cgpaMatch = html.match(/CGPA[^<]*Cut[^<]*off[^<]*<\/td>\s*<\/tr>\s*<tr[^>]*>\s*(?:<td[^>]*>[^<]*<\/td>\s*)*<td[^>]*>([0-9.]+)<\/td>/i);
+      if (cgpaMatch) {
+        result.cgpa = cgpaMatch[1];
+      }
+    }
+    
+  } catch (e) {
+    console.error('Error parsing CGPA HTML:', e);
+  }
+  
+  return result;
+}
+
+// Fetch CGPA for a single company/role
+function fetchCGPAForCompany(jnfId, comId, yop, rollno) {
+  return new Promise(function(resolve, reject) {
+    var cacheKey = cgpaCacheKey(jnfId, comId);
+    
+    // Check memory cache first - permanent cache, no expiration
+    if (cgpaCache[cacheKey] && cgpaCache[cacheKey].cgpa) {
+      resolve(cgpaCache[cacheKey]);
+      return;
+    }
+    
+    var url = 'https://erp.iitkgp.ac.in/TrainingPlacementSSO/TPJNFView.jsp' +
+              '?jnf_id=' + encodeURIComponent(jnfId) +
+              '&com_id=' + encodeURIComponent(comId) +
+              '&yop=' + encodeURIComponent(yop || '2025-2026') +
+              '&user_type=SU' +
+              '&rollno=' + encodeURIComponent(rollno || '');
+    
+    fetch(url, { credentials: 'include' })
+      .then(function(response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        return response.text();
+      })
+      .then(function(html) {
+        var parsed = parseCGPAFromHTML(html);
+        var result = {
+          jnfId: jnfId,
+          comId: comId,
+          cgpa: parsed.cgpa,
+          eligible: parsed.eligible,
+          fetchedAt: Date.now()
+        };
+        cgpaCache[cacheKey] = result;
+        resolve(result);
+      })
+      .catch(function(err) {
+        console.error('Failed to fetch CGPA for', jnfId, comId, err);
+        resolve({ jnfId: jnfId, comId: comId, cgpa: null, eligible: null, fetchedAt: Date.now(), error: true });
+      });
+  });
+}
+
+// Batch fetch CGPA with concurrency control
+function fetchCGPABatch(items, rollno, onProgress) {
+  return new Promise(function(resolve) {
+    if (!items || items.length === 0) {
+      resolve([]);
+      return;
+    }
+    
+    var results = [];
+    var queue = items.slice();
+    var activeCount = 0;
+    var completed = 0;
+    var total = items.length;
+    
+    function processNext() {
+      while (activeCount < CGPA_CONCURRENT_REQUESTS && queue.length > 0) {
+        var item = queue.shift();
+        activeCount++;
+        
+        fetchCGPAForCompany(item.jnfId, item.comId, item.yop, rollno)
+          .then(function(result) {
+            results.push(result);
+            activeCount--;
+            completed++;
+            
+            if (typeof onProgress === 'function') {
+              onProgress(Math.round((completed / total) * 100), completed, total);
+            }
+            
+            if (queue.length > 0) {
+              processNext();
+            } else if (activeCount === 0) {
+              resolve(results);
+            }
+          });
+      }
+    }
+    
+    processNext();
+  });
+}
+
+// Extract jnf_id and com_id from all rows in the grid
+function extractCGPAParamsFromGrid() {
+  var params = [];
+  var nowTs = Date.now();
+  
+  if (!targetFrame || !targetFrame.document) return params;
+  
+  // Try to get data from jqGrid
+  try {
+    var $ = targetFrame.jQuery || targetFrame.$;
+    // Try different possible grid IDs
+    var gridEl = $ ? ($('#grid37').length ? $('#grid37') : $('[id^="grid"]').first()) : null;
+    if ($ && gridEl && gridEl.length) {
+      var gridData = gridEl.jqGrid('getGridParam', 'data');
+      if (gridData && gridData.length > 0) {
+        for (var i = 0; i < gridData.length; i++) {
+          var row = gridData[i];
+          // Parse from designation onclick
+          var desigHtml = row.designation || '';
+          var parsed = parseTPJNFViewCall(desigHtml);
+          if (parsed) {
+            var isApplied = (row.apply || '').toUpperCase().indexOf('Y') !== -1;
+            var deadlineStr = row.resumedeadline || '';
+            var deadlineTime = NaN;
+            if (deadlineStr) {
+              var dt = getElementDateTimeFromText(deadlineStr);
+              if (dt instanceof Date && !isNaN(dt.getTime())) {
+                deadlineTime = dt.getTime();
+              }
+            }
+            var bucket = isApplied ? 'APPLIED' : (isNaN(deadlineTime) || deadlineTime <= nowTs) ? 'MISSED' : 'OPEN';
+            
+            params.push({
+              jnfId: parsed.jnfId,
+              comId: parsed.comId,
+              yop: parsed.yop,
+              _gridIndex: i,
+              company: extractTextFromHtml(row.companyname),
+              role: extractTextFromHtml(row.designation),
+              statusBucket: bucket,
+              deadline: deadlineStr
+            });
+          }
+        }
+        return params;
+      }
+    }
+  } catch (e) {
+    console.error('Error extracting from jqGrid:', e);
+  }
+  
+  // Fallback: parse from DOM
+  var designationCells = targetFrame.document.querySelectorAll('td[aria-describedby$="_designation"]');
+  for (var j = 0; j < designationCells.length; j++) {
+    var cell = designationCells[j];
+    var link = cell.querySelector('a[onclick]');
+    if (link) {
+      var onclick = link.getAttribute('onclick') || '';
+      var parsed = parseTPJNFViewCall(onclick);
+      if (parsed) {
+        var row = cell.parentElement;
+        var companyCell = row ? row.querySelector('td[aria-describedby$="_companyname"]') : null;
+        var statusCell = row ? row.querySelector('td[aria-describedby$="_apply"]') : null;
+        var deadlineCell = row ? row.querySelector('td[aria-describedby$="_resumedeadline"]') : null;
+        
+        var isApplied = statusCell && (statusCell.textContent || '').toUpperCase().indexOf('Y') !== -1;
+        var deadlineStr = deadlineCell ? (deadlineCell.textContent || '').trim() : '';
+        var deadlineTime = NaN;
+        if (deadlineStr) {
+          var dt = getElementDateTimeFromText(deadlineStr);
+          if (dt instanceof Date && !isNaN(dt.getTime())) {
+            deadlineTime = dt.getTime();
+          }
+        }
+        var bucket = isApplied ? 'APPLIED' : (isNaN(deadlineTime) || deadlineTime <= nowTs) ? 'MISSED' : 'OPEN';
+        
+        params.push({
+          jnfId: parsed.jnfId,
+          comId: parsed.comId,
+          yop: parsed.yop,
+          company: companyCell ? (companyCell.textContent || '').trim() : '',
+          role: (link.textContent || '').trim(),
+          statusBucket: bucket,
+          deadline: deadlineStr
+        });
+      }
+    }
+  }
+  
+  return params;
+}
+
+// Helper to extract text from HTML string
+function extractTextFromHtml(html) {
+  if (!html) return '';
+  var match = html.match(/title=['"]([^'"]+)['"]/);
+  if (match) return match[1];
+  // Fallback: strip tags
+  return html.replace(/<[^>]+>/g, '').trim();
+}
+
+// Get student roll number from the page
+function getStudentRollNo() {
+  try {
+    // Try to find roll number in the welcome message
+    var welcomeText = document.body.textContent || '';
+    var match = welcomeText.match(/\((\d{2}[A-Z]{2}\d{5})\)/);
+    if (match) return match[1];
+    
+    // Try from URL if available
+    var urlMatch = window.location.href.match(/rollno=(\d{2}[A-Z]{2}\d{5})/i);
+    if (urlMatch) return urlMatch[1];
+  } catch (e) {}
+  return '';
+}
+
+// Main function to fetch CGPA for OPEN companies only
+function fetchCGPAForOpenCompanies(allCompanies, onProgress, onComplete) {
+  if (isFetchingCGPA) {
+    console.log('CGPA fetch already in progress');
+    if (onComplete) onComplete([]);
+    return;
+  }
+  
+  isFetchingCGPA = true;
+  var rollno = getStudentRollNo();
+  
+  // Extract CGPA params directly from grid - this has jnfId/comId and statusBucket
+  var allParams = extractCGPAParamsFromGrid();
+  
+  console.log('CGPA fetch: Total params from grid:', allParams.length);
+  
+  // Filter to only OPEN companies that aren't already cached
+  var openItems = [];
+  
+  for (var i = 0; i < allParams.length; i++) {
+    var param = allParams[i];
+    
+    // Only fetch for OPEN companies
+    if (param.statusBucket !== 'OPEN') continue;
+    
+    // Check if already cached
+    var cacheKey = cgpaCacheKey(param.jnfId, param.comId);
+    var cached = cgpaCache[cacheKey];
+    if (cached && cached.cgpa) continue;
+    
+    openItems.push(param);
+  }
+  
+  console.log('CGPA fetch: Found', openItems.length, 'OPEN companies to fetch (not cached)');
+  
+  if (openItems.length === 0) {
+    isFetchingCGPA = false;
+    // Still trigger recolor to show existing badges
+    try { myFunction(); } catch (e) {}
+    if (onComplete) onComplete([]);
+    return;
+  }
+  
+  cgpaFetchProgress = { total: openItems.length, completed: 0 };
+  
+  fetchCGPABatch(openItems, rollno, function(pct, done, total) {
+    cgpaFetchProgress = { total: total, completed: done };
+    if (onProgress) onProgress(pct, done, total);
+    try {
+      chrome.runtime.sendMessage({ type: 'CGPA_FETCH_PROGRESS', progress: pct, completed: done, total: total });
+    } catch (e) {}
+  }).then(function(results) {
+    isFetchingCGPA = false;
+    
+    // Save to storage (permanent)
+    saveCGPACacheToStorage();
+    
+    // Trigger recolor to show badges on table
+    try { myFunction(); } catch (e) {}
+    
+    if (onComplete) onComplete(results);
+  });
+}
+
+// Save CGPA cache to chrome.storage.local
+function saveCGPACacheToStorage() {
+  try {
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ 
+        cgpaCache: cgpaCache,
+        cgpaCacheUpdatedAt: Date.now()
+      });
+    }
+  } catch (e) {}
+}
+
+// Load CGPA cache from storage on startup
+function loadCGPACacheFromStorage() {
+  try {
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get(['cgpaCache', 'cgpaCacheUpdatedAt', 'userCGPA'], function(data) {
+        if (data && data.cgpaCache) {
+          // Merge with existing cache, keeping newer entries
+          var stored = data.cgpaCache;
+          for (var key in stored) {
+            if (!cgpaCache[key] || stored[key].fetchedAt > (cgpaCache[key].fetchedAt || 0)) {
+              cgpaCache[key] = stored[key];
+            }
+          }
+        }
+        if (data && data.userCGPA) {
+          userCGPA = parseFloat(data.userCGPA);
+        }
+      });
+    }
+  } catch (e) {}
+}
+
+// Initialize CGPA cache from storage
+loadCGPACacheFromStorage();
+
+// Listen for userCGPA updates from popup
+if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
+  chrome.storage.onChanged.addListener(function(changes, area) {
+    if (area === 'local' && changes.userCGPA) {
+      userCGPA = parseFloat(changes.userCGPA.newValue) || null;
+    }
+  });
 }
 
 function computeBucket(isApplied, deadlineTime, nowTs) {
@@ -266,6 +667,93 @@ function changeColor(element, elementDateTime, currentDateTime) {
     changeColorElement[i].style.backgroundColor = color;
     changeColorElement[i].style.borderColor = boxColor;
   }
+  
+  // Add eligibility badge for OPEN companies (show CGPA requirement)
+  if (bucket === 'OPEN') {
+    addEligibilityBadgeToRow(element);
+  } else {
+    // Remove badge for non-OPEN companies
+    removeEligibilityBadgeFromRow(element);
+  }
+}
+
+// Remove eligibility badge from a row
+function removeEligibilityBadgeFromRow(deadlineCell) {
+  if (!deadlineCell) return;
+  var row = deadlineCell.parentElement;
+  if (!row) return;
+  
+  var designationCell = row.querySelector('td[aria-describedby$="_designation"]');
+  if (!designationCell) return;
+  
+  // Remove any existing badge
+  var badges = designationCell.querySelectorAll('[id^="cgpa-badge-"]');
+  for (var i = 0; i < badges.length; i++) {
+    badges[i].remove();
+  }
+}
+
+// Add eligibility badge to a row based on CGPA
+function addEligibilityBadgeToRow(deadlineCell) {
+  if (!deadlineCell) return;
+  
+  var row = deadlineCell.parentElement;
+  if (!row) return;
+  
+  // Get the designation cell to extract jnf_id and com_id
+  var designationCell = row.querySelector('td[aria-describedby$="_designation"]');
+  if (!designationCell) return;
+  
+  var link = designationCell.querySelector('a[onclick]');
+  if (!link) return;
+  
+  var onclick = link.getAttribute('onclick') || '';
+  var parsed = parseTPJNFViewCall(onclick);
+  if (!parsed) return;
+  
+  var cacheKey = cgpaCacheKey(parsed.jnfId, parsed.comId);
+  var cached = cgpaCache[cacheKey];
+  
+  // Find or create badge container in the designation cell
+  var badgeId = 'cgpa-badge-' + parsed.jnfId + '-' + parsed.comId;
+  var existingBadge = designationCell.querySelector('#' + badgeId);
+  
+  if (!cached || !cached.cgpa) {
+    // No CGPA data yet - remove badge if exists
+    if (existingBadge) existingBadge.remove();
+    return;
+  }
+  
+  // Calculate eligibility
+  var requiredCGPA = parseFloat(cached.cgpa);
+  var isEligible = userCGPA ? (userCGPA >= requiredCGPA) : null;
+  
+  // Create or update badge
+  if (!existingBadge) {
+    existingBadge = targetFrame.document.createElement('span');
+    existingBadge.id = badgeId;
+    existingBadge.style.cssText = 'margin-right:6px;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:bold;display:inline-block;';
+    // Insert at the beginning of the cell
+    designationCell.insertBefore(existingBadge, designationCell.firstChild);
+  }
+  
+  if (isEligible === true) {
+    existingBadge.textContent = '✓ ' + cached.cgpa;
+    existingBadge.style.backgroundColor = 'rgba(165,252,3,0.3)';
+    existingBadge.style.color = '#4a7c00';
+    existingBadge.title = 'You meet the CGPA requirement (' + cached.cgpa + ')';
+  } else if (isEligible === false) {
+    existingBadge.textContent = '✗ ' + cached.cgpa;
+    existingBadge.style.backgroundColor = 'rgba(252,36,3,0.3)';
+    existingBadge.style.color = '#8b0000';
+    existingBadge.title = 'CGPA requirement: ' + cached.cgpa + ' (Your CGPA: ' + userCGPA + ')';
+  } else {
+    // No user CGPA set
+    existingBadge.textContent = 'CG: ' + cached.cgpa;
+    existingBadge.style.backgroundColor = 'rgba(108,124,255,0.2)';
+    existingBadge.style.color = '#4a5580';
+    existingBadge.title = 'CGPA requirement: ' + cached.cgpa + ' (Set your CGPA in extension)';
+  }
 }
 
 
@@ -377,6 +865,26 @@ function scheduleAutoDeepScan() {
             });
           }
         } catch (e) {}
+        
+        // Auto-fetch CGPA for OPEN companies after deep scan completes
+        setTimeout(function() {
+          fetchCGPAForOpenCompanies(list, function(pct, done, total) {
+            try { chrome.runtime.sendMessage({ type: 'CGPA_FETCH_PROGRESS', progress: pct, completed: done, total: total }); } catch (e) {}
+          }, function(results) {
+            var updatedList = attachCGPAToCompanies(list);
+            try {
+              chrome.storage.local.set({ 
+                allCompanies: updatedList,
+                allCompaniesUpdatedAt: Date.now()
+              });
+              chrome.runtime.sendMessage({ 
+                type: 'CGPA_FETCH_COMPLETE', 
+                allCompanies: updatedList,
+                cgpaResults: results 
+              });
+            } catch (e) {}
+          });
+        }, 500);
       }, function (pct) {
         try { chrome.runtime.sendMessage({ type: 'DEEP_SCAN_PROGRESS', progress: pct }); } catch (e) {}
       });
@@ -386,12 +894,46 @@ function scheduleAutoDeepScan() {
 }
 scheduleAutoDeepScan();
 
+// Attach CGPA data to company list
+function attachCGPAToCompanies(list) {
+  var paramsMap = {};
+  var allParams = extractCGPAParamsFromGrid();
+  
+  for (var i = 0; i < allParams.length; i++) {
+    var key = (allParams[i].company + '|' + allParams[i].role).toLowerCase();
+    paramsMap[key] = allParams[i];
+  }
+  
+  for (var j = 0; j < list.length; j++) {
+    var comp = list[j];
+    var key = ((comp.company || '') + '|' + (comp.role || '')).toLowerCase();
+    var params = paramsMap[key];
+    
+    if (params) {
+      comp.jnfId = params.jnfId;
+      comp.comId = params.comId;
+      
+      var cacheKey = cgpaCacheKey(params.jnfId, params.comId);
+      var cached = cgpaCache[cacheKey];
+      
+      if (cached) {
+        comp.cgpa = cached.cgpa;
+        comp.cgpaEligible = cached.eligible;
+        comp.cgpaFetchedAt = cached.fetchedAt;
+      }
+    }
+  }
+  
+  return list;
+}
+
 // Respond to popup requests to get applied companies on demand
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
   chrome.runtime.onMessage.addListener(function (msg, sender, sendResponse) {
     if (!msg) return;
     if (msg.type === 'GET_APPLIED_COMPANIES' || msg.type === 'GET_COMPANIES') {
       var deep = !!msg.deep;
+      var fetchCGPA = !!msg.fetchCGPA;
       try {
         if (!targetFrame || !targetFrame.document) {
           sendResponse({ appliedCompanies: [], allCompanies: [], counts: { applied:0, open:0, missed:0 }, updatedAt: Date.now() });
@@ -407,6 +949,10 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
             else if (b === 'OPEN') counts.open++;
             else if (b === 'MISSED') counts.missed++;
           }
+          
+          // Attach CGPA data from cache
+          list = attachCGPAToCompanies(list);
+          
           var appliedOnly = list.filter(function (it) { return it.statusBucket === 'APPLIED'; });
           try {
             if (chrome.storage && chrome.storage.local) {
@@ -419,6 +965,24 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
               });
             }
           } catch (e) {}
+          
+          // If requested, start CGPA fetch in background (prioritizing OPEN companies)
+          if (fetchCGPA && !isFetchingCGPA) {
+            setTimeout(function() {
+              fetchCGPAForOpenCompanies(list, null, function(results) {
+                // Re-attach CGPA and notify
+                var updatedList = attachCGPAToCompanies(list);
+                try {
+                  chrome.runtime.sendMessage({ 
+                    type: 'CGPA_FETCH_COMPLETE', 
+                    allCompanies: updatedList,
+                    cgpaResults: results 
+                  });
+                } catch (e) {}
+              });
+            }, 100);
+          }
+          
           try { sendResponse({ appliedCompanies: appliedOnly, allCompanies: list, counts: counts, updatedAt: ts }); } catch (e) {}
         };
 
@@ -437,6 +1001,60 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
       }
       return true; // keep message channel open for async sendResponse
     }
+    
+    // New message type: Fetch CGPA for companies
+    if (msg.type === 'FETCH_CGPA') {
+      try {
+        if (!targetFrame || !targetFrame.document) {
+          sendResponse({ success: false, error: 'No frame' });
+          return true;
+        }
+        
+        // Get current companies list
+        var map = {};
+        collectAllFromDOM(map);
+        var list = Object.keys(map).map(function (k) { return map[k]; });
+        
+        fetchCGPAForOpenCompanies(list, function(pct, done, total) {
+          try { chrome.runtime.sendMessage({ type: 'CGPA_FETCH_PROGRESS', progress: pct, completed: done, total: total }); } catch (e) {}
+        }, function(results) {
+          // Update storage with CGPA-enriched data
+          var updatedList = attachCGPAToCompanies(list);
+          try {
+            chrome.storage.local.set({ 
+              allCompanies: updatedList,
+              allCompaniesUpdatedAt: Date.now()
+            });
+          } catch (e) {}
+          try { 
+            chrome.runtime.sendMessage({ 
+              type: 'CGPA_FETCH_COMPLETE', 
+              allCompanies: updatedList,
+              cgpaResults: results 
+            }); 
+          } catch (e) {}
+        });
+        
+        sendResponse({ success: true, message: 'CGPA fetch started' });
+      } catch (e) {
+        sendResponse({ success: false, error: String(e) });
+      }
+      return true;
+    }
+    
+    // Get CGPA cache status
+    if (msg.type === 'GET_CGPA_STATUS') {
+      var cacheCount = Object.keys(cgpaCache).length;
+      var hasData = cacheCount > 0;
+      sendResponse({ 
+        cacheCount: cacheCount, 
+        hasData: hasData, 
+        isFetching: isFetchingCGPA,
+        progress: cgpaFetchProgress
+      });
+      return true;
+    }
+    
     if (msg.type === 'RECOLOR') {
       try { myFunction(); } catch (e) {}
       try { sendResponse({ ok: true }); } catch (e) {}
