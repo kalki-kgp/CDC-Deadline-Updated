@@ -104,10 +104,10 @@ function filteredItems(base){
 
 function parseDeadline(s){
   if (!s) return NaN;
-  // Expect dd-mm-yyyy hh:mm
-  const m = String(s).trim().match(/^(\d{2})-(\d{2})-(\d{4})\s+(\d{2}):(\d{2})/);
+  // ERP now uses yyyy-mm-dd hh:mm format
+  const m = String(s).trim().match(/^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/);
   if (!m) return NaN;
-  const [_, d, mo, y, h, mi] = m;
+  const [_, y, mo, d, h, mi] = m;
   const dt = new Date(Number(y), Number(mo)-1, Number(d), Number(h), Number(mi));
   return dt.getTime();
 }

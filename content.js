@@ -37,14 +37,15 @@ function generateXPathExpressions(templateXPath, startNumber, endNumber) {
   return xpaths;
 }
 
-// Get element date and time from text content 
+// Get element date and time from text content
 function getElementDateTimeFromText(timeTextContent) {
 
   // Parse the time text and create a Date object
+  // ERP now uses YYYY-MM-DD format instead of DD-MM-YYYY
   var parts = timeTextContent.split(/[- :]/);
-  var year = parseInt(parts[2], 10);
+  var year = parseInt(parts[0], 10);
   var month = parseInt(parts[1], 10) - 1; // Months are zero-based in JavaScript
-  var day = parseInt(parts[0], 10);
+  var day = parseInt(parts[2], 10);
   var hour = parseInt(parts[3], 10);
   var minute = parseInt(parts[4], 10);
   var elementDateTime = new Date(year, month, day, hour, minute);
